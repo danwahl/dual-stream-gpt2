@@ -40,9 +40,12 @@ Loss:   loss = CE(logits_A, target_A) + CE(logits_B, target_B)
 - Use gradient accumulation for effective larger batches
 
 ### Dependencies
+- Python 3.8+
+
 ```
 torch>=2.0
 transformers>=4.30
+tokenizers>=0.13
 datasets
 wandb (optional, for logging)
 numpy

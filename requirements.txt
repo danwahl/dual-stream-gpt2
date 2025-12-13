@@ -1,0 +1,12 @@
+# Dual-Stream GPT-2 Dependencies
+# Requires Python 3.8+
+
+torch>=2.0
+transformers>=4.30
+tokenizers>=0.13
+datasets
+numpy
+tqdm
+
+# Optional: experiment tracking
+# wandb
