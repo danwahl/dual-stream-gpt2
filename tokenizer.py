@@ -13,56 +13,33 @@ from transformers import GPT2Tokenizer
 from tokenizers import Tokenizer, models, pre_tokenizers, decoders
 
 
-def extract_merges(model_name: str = "gpt2") -> list[tuple[str, str]]:
-    """
-    Extract the ordered merge list from a pretrained GPT-2 tokenizer.
-
-    Args:
-        model_name: HuggingFace model name (default: 'gpt2')
-
-    Returns:
-        List of merge tuples ordered by priority (most common first).
-        Example: [('Ġ', 't'), ('Ġ', 'a'), ('h', 'e'), ...]
-    """
-    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
-
-    # bpe_ranks maps (token1, token2) -> merge_priority
-    # Lower number = earlier merge = more common pattern
-    merges = sorted(tokenizer.bpe_ranks.items(), key=lambda x: x[1])
-
-    # Return just the merge pairs, in order
-    return [merge_pair for merge_pair, rank in merges]
-
-
 def create_truncated_bpe_tokenizer(
-    merges: list[tuple[str, str]], vocab_size: int
+    gpt2_tokenizer: GPT2Tokenizer, vocab_size: int
 ) -> Tokenizer:
     """
-    Create a BPE tokenizer using only the first N merges.
+    Create a BPE tokenizer by truncating GPT-2's vocab and merges.
 
     Args:
-        merges: Full list of merge tuples from GPT-2
-        vocab_size: Target vocabulary size (256 + num_merges_to_use)
+        gpt2_tokenizer: The pretrained GPT-2 tokenizer to extract from
+        vocab_size: Target vocabulary size (256 base + N merges)
 
     Returns:
-        A tokenizers.Tokenizer object
+        A tokenizers.Tokenizer object with truncated vocab
     """
-    num_merges = vocab_size - 256  # Account for base byte vocabulary
-    truncated_merges = merges[:num_merges]
-
-    # Build vocabulary: bytes 0-255, then merged tokens
+    # GPT-2's vocab is already ordered: 0-255 are byte tokens, 256+ are merges
+    # Just take the first vocab_size tokens
     vocab = {}
-    for i in range(256):
-        # GPT-2 uses a specific byte encoding scheme
-        byte_char = bytes([i]).decode("latin-1")
-        vocab[byte_char] = i
+    for token, token_id in gpt2_tokenizer.encoder.items():
+        if token_id < vocab_size:
+            vocab[token] = token_id
 
-    # Add merged tokens
-    for idx, (tok1, tok2) in enumerate(truncated_merges):
-        merged = tok1 + tok2
-        vocab[merged] = 256 + idx
+    # Get merges in order (bpe_ranks maps tuple -> priority)
+    # We need (vocab_size - 256) merges
+    num_merges = vocab_size - 256
+    sorted_merges = sorted(gpt2_tokenizer.bpe_ranks.items(), key=lambda x: x[1])
+    truncated_merges = [pair for pair, rank in sorted_merges[:num_merges]]
 
-    # Create tokenizer with truncated merges
+    # Create tokenizer with truncated vocab and merges
     tokenizer = Tokenizer(
         models.BPE(vocab=vocab, merges=truncated_merges, fuse_unk=False)
     )
@@ -78,7 +55,7 @@ def create_dual_tokenizers(
     main_vocab_size: int = 49000, pidgin_vocab_size: int = 1000
 ) -> tuple[Tokenizer, Tokenizer]:
     """
-    Create main and pidgin tokenizers from GPT-2's merge rules.
+    Create main and pidgin tokenizers from GPT-2's vocab and merge rules.
 
     Both tokenizers share the same base vocabulary (256 bytes) and
     early merges, but pidgin uses fewer merges = coarser chunking.
@@ -90,11 +67,11 @@ def create_dual_tokenizers(
     Returns:
         Tuple of (main_tokenizer, pidgin_tokenizer)
     """
-    # Extract all merges from pretrained GPT-2
-    all_merges = extract_merges("gpt2")
+    # Load pretrained GPT-2 tokenizer once
+    gpt2_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 
-    main_tokenizer = create_truncated_bpe_tokenizer(all_merges, main_vocab_size)
-    pidgin_tokenizer = create_truncated_bpe_tokenizer(all_merges, pidgin_vocab_size)
+    main_tokenizer = create_truncated_bpe_tokenizer(gpt2_tokenizer, main_vocab_size)
+    pidgin_tokenizer = create_truncated_bpe_tokenizer(gpt2_tokenizer, pidgin_vocab_size)
 
     return main_tokenizer, pidgin_tokenizer
 
