@@ -11,12 +11,13 @@ English words. Words are normalized (lowercase, stripped punctuation) before loo
 import re
 from pathlib import Path
 from transformers import GPT2Tokenizer
+from tokenizers import Tokenizer, models, pre_tokenizers, decoders
 
 
 # Token ID boundaries
-MAIN_VOCAB_END = 49257  # Main vocab is 0 to 49,256 (inclusive)
-PIDGIN_OFFSET = 49257   # Pidgin tokens start at 49,257
-PIDGIN_VOCAB_SIZE = 1000  # 1000 pidgin tokens (49,257 to 50,256)
+MAIN_VOCAB_SIZE = 49257  # Main vocab is 0 to 49,256 (inclusive)
+PIDGIN_OFFSET = 49257    # Pidgin tokens start at 49,257
+PIDGIN_VOCAB_SIZE = 1000 # 1000 pidgin tokens (49,257 to 50,256)
 
 # Special token indices within pidgin vocab (before offset)
 PIDGIN_PAD_IDX = 0
@@ -30,23 +31,58 @@ PIDGIN_UNK_ID = PIDGIN_OFFSET + PIDGIN_UNK_IDX  # 49,258
 PIDGIN_EOS_ID = PIDGIN_OFFSET + PIDGIN_EOS_IDX  # 49,259
 
 
+def _create_truncated_main_tokenizer() -> Tokenizer:
+    """
+    Create a truncated BPE tokenizer for Stream A using GPT-2's vocab.
+
+    Uses only the first 49,257 tokens (0-49,256) by truncating the merge list.
+    Rare patterns that would produce higher token IDs naturally fall back
+    to their component tokens.
+    """
+    # Load GPT-2 tokenizer to extract vocab and merges
+    gpt2_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+
+    # Get first MAIN_VOCAB_SIZE tokens from vocab
+    vocab = {}
+    for token, token_id in gpt2_tokenizer.encoder.items():
+        if token_id < MAIN_VOCAB_SIZE:
+            vocab[token] = token_id
+
+    # Get merges in order, truncated to produce only tokens < MAIN_VOCAB_SIZE
+    # We need (MAIN_VOCAB_SIZE - 256) merges since first 256 are byte tokens
+    num_merges = MAIN_VOCAB_SIZE - 256
+    sorted_merges = sorted(gpt2_tokenizer.bpe_ranks.items(), key=lambda x: x[1])
+    truncated_merges = [pair for pair, rank in sorted_merges[:num_merges]]
+
+    # Create tokenizer with truncated vocab and merges
+    tokenizer = Tokenizer(
+        models.BPE(vocab=vocab, merges=truncated_merges, fuse_unk=False)
+    )
+
+    # Match GPT-2's pre-tokenization
+    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tokenizer.decoder = decoders.ByteLevel()
+
+    return tokenizer
+
+
 class MainTokenizer:
     """
-    Wrapper around GPT-2 tokenizer for Stream A.
+    Truncated BPE tokenizer for Stream A.
 
-    Tokens 0-49,256 are valid. If GPT-2 produces tokens >= 49,257,
-    they are mapped to a fallback (though this is rare in practice).
+    Uses GPT-2's vocabulary but only the first 49,257 tokens (0-49,256).
+    Rare patterns that would use higher token IDs naturally decompose
+    into component tokens via the truncated merge list.
     """
 
     def __init__(self):
-        self.tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-        self.vocab_size = MAIN_VOCAB_END  # 49,257 tokens (0 to 49,256)
+        self.tokenizer = _create_truncated_main_tokenizer()
+        self.vocab_size = MAIN_VOCAB_SIZE
 
     def encode(self, text: str) -> list[int]:
-        """Encode text to token IDs, clamping any out-of-range tokens."""
-        ids = self.tokenizer.encode(text, add_special_tokens=False)
-        # Clamp any tokens >= MAIN_VOCAB_END (rare, but possible)
-        return [min(id, MAIN_VOCAB_END - 1) for id in ids]
+        """Encode text to token IDs (all guaranteed to be < 49,257)."""
+        encoding = self.tokenizer.encode(text)
+        return encoding.ids
 
     def decode(self, ids: list[int]) -> str:
         """Decode token IDs back to text."""
@@ -54,7 +90,9 @@ class MainTokenizer:
 
     @property
     def eos_token_id(self) -> int:
-        return self.tokenizer.eos_token_id  # 50256, but we may not use it
+        # GPT-2's EOS is 50256, which is outside our range
+        # We don't use a special EOS for main stream in this design
+        return None
 
 
 class PidginTokenizer:
@@ -223,10 +261,10 @@ def verify_tokenizers(dual_tokenizer: DualStreamTokenizer) -> bool:
     main_ids = dual_tokenizer.encode_main("The quick brown fox")
     pidgin_ids = dual_tokenizer.encode_pidgin("the big thing")
 
-    assert all(id < MAIN_VOCAB_END for id in main_ids), "Main tokens should be < 49,257"
+    assert all(id < MAIN_VOCAB_SIZE for id in main_ids), "Main tokens should be < 49,257"
     assert all(id >= PIDGIN_OFFSET for id in pidgin_ids), "Pidgin tokens should be >= 49,257"
 
-    print(f"  Main token IDs: {main_ids} (all < {MAIN_VOCAB_END})")
+    print(f"  Main token IDs: {main_ids} (all < {MAIN_VOCAB_SIZE})")
     print(f"  Pidgin token IDs: {pidgin_ids} (all >= {PIDGIN_OFFSET})")
     print()
 
