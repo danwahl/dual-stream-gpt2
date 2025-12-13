@@ -135,10 +135,13 @@ class PidginTokenizer:
 
         # Add words starting after reserved tokens
         max_words = PIDGIN_VOCAB_SIZE - PIDGIN_RESERVED  # 997 words max
-        for i, word in enumerate(words[:max_words]):
-            if word not in self.word_to_id:  # Skip duplicates
-                local_idx = PIDGIN_RESERVED + i
+        local_idx = PIDGIN_RESERVED
+        for word in words:
+            if local_idx >= PIDGIN_VOCAB_SIZE:
+                break  # Vocab full
+            if word and word not in self.word_to_id:  # Skip empty/duplicates
                 self._add_token(word, local_idx)
+                local_idx += 1
 
         self.vocab_size = len(self.word_to_id)
 
@@ -226,6 +229,16 @@ def verify_tokenizers(dual_tokenizer: DualStreamTokenizer) -> bool:
     print(f"Pidgin token ID range: {PIDGIN_OFFSET} - {PIDGIN_OFFSET + PIDGIN_VOCAB_SIZE - 1}")
     print()
 
+    # Show sample words from pidgin vocabulary
+    print("Sample pidgin vocabulary words:")
+    pidgin_words = [w for w in dual_tokenizer.pidgin.word_to_id.keys()
+                    if not w.startswith("<")]  # Skip special tokens
+    for word in pidgin_words[:20]:
+        token_id = dual_tokenizer.pidgin.word_to_id[word]
+        print(f"  '{word}' -> {token_id}")
+    print(f"  ... ({len(pidgin_words)} total words)")
+    print()
+
     # Test main tokenizer
     print("Stream A (Main) examples:")
     main_tests = [
@@ -241,25 +254,51 @@ def verify_tokenizers(dual_tokenizer: DualStreamTokenizer) -> bool:
         print(f"    -> decoded: '{decoded}'")
     print()
 
-    # Test pidgin tokenizer
+    # Test truncated tokens: these would have been >=49,257 in original GPT-2
+    # With truncated merges, they should decompose into component tokens
+    print("Truncated token test (rare patterns that decompose):")
+    gpt2_tok = GPT2Tokenizer.from_pretrained("gpt2")
+    # Find some tokens that are >= 49,257 in original GPT-2
+    rare_tokens = []
+    for token, token_id in gpt2_tok.encoder.items():
+        if token_id >= MAIN_VOCAB_SIZE and token_id < 50000:
+            # Skip byte sequences, get readable tokens
+            if token.isprintable() and len(token) > 2:
+                rare_tokens.append((token, token_id))
+        if len(rare_tokens) >= 5:
+            break
+
+    for token, orig_id in rare_tokens:
+        # Encode with our truncated tokenizer
+        our_ids = dual_tokenizer.encode_main(token)
+        print(f"  '{token}' (original GPT-2 ID: {orig_id})")
+        print(f"    -> our tokenizer: {our_ids} (decomposed into {len(our_ids)} tokens)")
+    print()
+
+    # Test pidgin tokenizer using actual vocabulary words
     print("Stream B (Pidgin) examples:")
-    pidgin_tests = [
-        "the big red thing",
-        "water fire earth air",
-        "hello world unknown_word_xyz",
-    ]
-    for text in pidgin_tests:
-        ids = dual_tokenizer.encode_pidgin(text)
-        decoded = dual_tokenizer.decode_pidgin(ids)
-        print(f"  '{text}'")
-        print(f"    -> {len(ids)} tokens: {ids}")
-        print(f"    -> decoded: '{decoded}'")
+    # Use first few actual words from vocabulary
+    test_words = pidgin_words[:5] if pidgin_words else ["test"]
+    test_text = " ".join(test_words)
+    ids = dual_tokenizer.encode_pidgin(test_text)
+    decoded = dual_tokenizer.decode_pidgin(ids)
+    print(f"  '{test_text}'")
+    print(f"    -> {len(ids)} tokens: {ids}")
+    print(f"    -> decoded: '{decoded}'")
+
+    # Test with unknown word
+    unknown_test = f"{test_words[0] if test_words else 'test'} xyzunknownword123"
+    ids = dual_tokenizer.encode_pidgin(unknown_test)
+    decoded = dual_tokenizer.decode_pidgin(ids)
+    print(f"  '{unknown_test}'")
+    print(f"    -> {len(ids)} tokens: {ids}")
+    print(f"    -> decoded: '{decoded}'")
     print()
 
     # Verify token ID ranges don't overlap
     print("Verifying token ID ranges...")
     main_ids = dual_tokenizer.encode_main("The quick brown fox")
-    pidgin_ids = dual_tokenizer.encode_pidgin("the big thing")
+    pidgin_ids = dual_tokenizer.encode_pidgin(test_text)
 
     assert all(id < MAIN_VOCAB_SIZE for id in main_ids), "Main tokens should be < 49,257"
     assert all(id >= PIDGIN_OFFSET for id in pidgin_ids), "Pidgin tokens should be >= 49,257"
