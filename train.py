@@ -114,10 +114,12 @@ def train(
 
     # Training state
     global_step = 0
+    start_step = 0  # Track where this session started
 
     # Resume from checkpoint if provided
     if resume_from is not None:
         global_step = resume_from.get("global_step", 0)
+        start_step = global_step  # Remember starting point for this session
         if "optimizer_state_dict" in resume_from:
             optimizer.load_state_dict(resume_from["optimizer_state_dict"])
         if "scheduler_state_dict" in resume_from:
@@ -199,9 +201,10 @@ def train(
                 # Logging
                 if global_step % training_config.logging_steps == 0:
                     elapsed = time.time() - start_time
+                    session_steps = global_step - start_step
                     avg_loss = (total_loss - logging_loss) / training_config.logging_steps
-                    avg_loss_a = total_loss_a / global_step
-                    avg_loss_b = total_loss_b / global_step
+                    avg_loss_a = total_loss_a / session_steps
+                    avg_loss_b = total_loss_b / session_steps
 
                     print(
                         f"  Step {global_step}/{total_steps} | "
@@ -246,18 +249,20 @@ def train(
     save_checkpoint(model, optimizer, scheduler, global_step, output_dir / "final_model.pt")
 
     total_time = time.time() - start_time
+    session_steps = global_step - start_step
     print()
     print("=" * 60)
     print("Training Complete")
     print("=" * 60)
-    print(f"  Total steps: {global_step}")
+    print(f"  Total steps: {global_step} (session: {session_steps})")
     print(f"  Total time: {total_time:.1f}s ({total_time / 60:.1f}m)")
-    print(f"  Final loss: {total_loss / global_step:.4f}")
+    print(f"  Final loss: {total_loss / session_steps:.4f}")
     print(f"  Best val loss: {best_val_loss:.4f}")
 
     return {
         "global_step": global_step,
-        "total_loss": total_loss / global_step,
+        "session_steps": session_steps,
+        "total_loss": total_loss / session_steps,
         "best_val_loss": best_val_loss,
         "total_time": total_time,
     }
