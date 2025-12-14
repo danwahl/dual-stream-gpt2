@@ -65,6 +65,7 @@ def train(
     training_config: TrainingConfig,
     output_dir: Path,
     max_steps: int = -1,
+    resume_from: dict = None,
 ) -> dict:
     """
     Main training loop.
@@ -77,6 +78,7 @@ def train(
         training_config: Training hyperparameters.
         output_dir: Directory for checkpoints.
         max_steps: Override max steps (-1 to use config).
+        resume_from: Optional checkpoint dict to resume from.
 
     Returns:
         Dict with training statistics.
@@ -112,6 +114,15 @@ def train(
 
     # Training state
     global_step = 0
+
+    # Resume from checkpoint if provided
+    if resume_from is not None:
+        global_step = resume_from.get("global_step", 0)
+        if "optimizer_state_dict" in resume_from:
+            optimizer.load_state_dict(resume_from["optimizer_state_dict"])
+        if "scheduler_state_dict" in resume_from:
+            scheduler.load_state_dict(resume_from["scheduler_state_dict"])
+        print(f"Resumed training from step {global_step}")
     total_loss = 0.0
     total_loss_a = 0.0
     total_loss_b = 0.0
@@ -346,6 +357,30 @@ def load_checkpoint(
 # Main
 # =============================================================================
 
+def find_latest_checkpoint(output_dir: Path) -> Path | None:
+    """Find the most recent checkpoint in output_dir."""
+    if not output_dir.exists():
+        return None
+
+    checkpoints = list(output_dir.glob("checkpoint_*.pt"))
+    if not checkpoints:
+        # Check for final_model.pt
+        final = output_dir / "final_model.pt"
+        if final.exists():
+            return final
+        return None
+
+    # Sort by step number
+    def get_step(p):
+        try:
+            return int(p.stem.split("_")[1])
+        except (IndexError, ValueError):
+            return 0
+
+    checkpoints.sort(key=get_step, reverse=True)
+    return checkpoints[0]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train Dual-Stream GPT-2")
     parser.add_argument("--max_steps", type=int, default=1000, help="Maximum training steps")
@@ -354,7 +389,11 @@ def main():
     parser.add_argument("--output_dir", type=str, default="checkpoints", help="Output directory")
     parser.add_argument("--max_train_examples", type=int, default=None, help="Limit training examples")
     parser.add_argument("--max_val_examples", type=int, default=1000, help="Limit validation examples")
+    parser.add_argument("--resume", type=str, nargs="?", const="auto", default=None,
+                        help="Resume from checkpoint. Use --resume for latest, or --resume PATH for specific checkpoint")
     args = parser.parse_args()
+
+    output_dir = Path(args.output_dir)
 
     # Configs
     config = DualStreamConfig()
@@ -375,6 +414,34 @@ def main():
     model = DualStreamGPT2(config)
     model = model.to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    # Handle checkpoint resumption
+    resume_step = 0
+    optimizer = None
+    scheduler = None
+
+    if args.resume:
+        if args.resume == "auto":
+            checkpoint_path = find_latest_checkpoint(output_dir)
+            if checkpoint_path is None:
+                print("No checkpoint found to resume from. Starting fresh.")
+            else:
+                print(f"Found latest checkpoint: {checkpoint_path}")
+        else:
+            checkpoint_path = Path(args.resume)
+            if not checkpoint_path.exists():
+                raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        if checkpoint_path is not None:
+            print(f"Loading checkpoint: {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            resume_step = checkpoint.get("global_step", 0)
+            print(f"Resuming from step {resume_step}")
+
+            # We'll restore optimizer/scheduler state after creating them in train()
+            # Store the checkpoint for later
+            args._checkpoint = checkpoint
 
     # Data
     print("Loading datasets...")
@@ -402,8 +469,9 @@ def main():
         val_dataloader=val_dataloader,
         config=config,
         training_config=training_config,
-        output_dir=Path(args.output_dir),
+        output_dir=output_dir,
         max_steps=args.max_steps,
+        resume_from=getattr(args, "_checkpoint", None),
     )
 
 
