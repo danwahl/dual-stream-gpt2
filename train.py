@@ -13,16 +13,11 @@ from __future__ import annotations
 import argparse
 import math
 import time
-import warnings
 from pathlib import Path
 
 import torch
 from torch.optim import AdamW
 from torch.amp import GradScaler, autocast
-
-# Suppress false positive warning when resuming from checkpoint
-# (we do call optimizer.step() before scheduler.step())
-warnings.filterwarnings("ignore", message="Detected call of `lr_scheduler.step\\(\\)` before")
 
 from config import DualStreamConfig, TrainingConfig
 from model import DualStreamGPT2
@@ -397,6 +392,8 @@ def main():
     parser.add_argument("--eval_steps", type=int, default=200, help="Evaluate every N steps")
     parser.add_argument("--logging_steps", type=int, default=50, help="Log every N steps")
     parser.add_argument("--output_dir", type=str, default="checkpoints", help="Output directory")
+    parser.add_argument("--pidgin_vocab_size", type=int, default=None,
+                        help="Size of pidgin vocabulary (default: 10000)")
     parser.add_argument("--max_train_examples", type=int, default=None, help="Limit training examples")
     parser.add_argument("--max_val_examples", type=int, default=1000, help="Limit validation examples")
     parser.add_argument("--resume", type=str, nargs="?", const="auto", default=None,
@@ -406,7 +403,10 @@ def main():
     output_dir = Path(args.output_dir)
 
     # Configs
-    config = DualStreamConfig()
+    if args.pidgin_vocab_size is not None:
+        config = DualStreamConfig(pidgin_vocab_size=args.pidgin_vocab_size)
+    else:
+        config = DualStreamConfig()
     training_config = TrainingConfig()
     training_config.eval_steps = args.eval_steps
     training_config.logging_steps = args.logging_steps
