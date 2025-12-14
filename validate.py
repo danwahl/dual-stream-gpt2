@@ -126,14 +126,14 @@ def analyze_sample(
         top10_a = torch.topk(probs_a[pos], k=10)
         top10_b = torch.topk(probs_b[pos], k=10)
 
-        # Decode top predictions
+        # Decode top predictions - store token ID, decoded string, and probability
         top10_a_tokens = []
         for tid, p in zip(top10_a.indices.tolist(), top10_a.values.tolist()):
             try:
                 tok_str = tokenizer.main.decode([tid])
             except:
                 tok_str = f"<{tid}>"
-            top10_a_tokens.append((tok_str, p))
+            top10_a_tokens.append((tid, tok_str, p))
 
         top10_b_tokens = []
         for tid, p in zip(top10_b.indices.tolist(), top10_b.values.tolist()):
@@ -141,14 +141,26 @@ def analyze_sample(
                 tok_str = tokenizer.pidgin.decode([tid + config.main_vocab_size])
             except:
                 tok_str = f"<{tid}>"
-            top10_b_tokens.append((tok_str, p))
+            top10_b_tokens.append((tid, tok_str, p))  # tid is local (0-999)
+
+        # Decode target tokens using the same method as predictions for consistency
+        try:
+            target_a_str = tokenizer.main.decode([target_a])
+        except:
+            target_a_str = f"<{target_a}>"
+        try:
+            target_b_str = tokenizer.pidgin.decode([target_b])
+        except:
+            target_b_str = f"<{target_b}>"
 
         pos_info = {
             "pos": pos,
             "input_token_a": tokens_a[pos] if pos < len(tokens_a) else "?",
             "input_token_b": tokens_b[pos] if pos < len(tokens_b) else "?",
-            "target_token_a": tokens_a[pos + 1] if pos + 1 < len(tokens_a) else "?",
-            "target_token_b": tokens_b[pos + 1] if pos + 1 < len(tokens_b) else "?",
+            "target_id_a": target_a,
+            "target_id_b": target_b_local,  # local index for comparison
+            "target_token_a": target_a_str,
+            "target_token_b": target_b_str,
             "target_prob_a": prob_a,
             "target_prob_b": prob_b,
             "target_logprob_a": math.log(prob_a) if prob_a > 0 else float("-inf"),
@@ -190,39 +202,40 @@ def print_analysis(analysis: dict, sample_num: int) -> None:
         print(f"Position {pos_info['pos']}")
         print("-" * 80)
 
-        # Stream A
-        target_in_top10_a = any(pos_info["target_token_a"] == t[0] for t in pos_info["top10_a"])
-        rank_a = next((i+1 for i, t in enumerate(pos_info["top10_a"]) if t[0] == pos_info["target_token_a"]), ">10")
+        # Stream A - compare by token ID
+        target_id_a = pos_info["target_id_a"]
+        rank_a = next((i+1 for i, (tid, tok, p) in enumerate(pos_info["top10_a"]) if tid == target_id_a), ">10")
         print(f"  Stream A: '{pos_info['input_token_a']}' → '{pos_info['target_token_a']}' (P={pos_info['target_prob_a']:.4f}, rank={rank_a})")
         print(f"  Top 10 predictions:")
-        for i, (tok, prob) in enumerate(pos_info["top10_a"]):
-            marker = "←" if tok == pos_info["target_token_a"] else ""
+        for i, (tid, tok, prob) in enumerate(pos_info["top10_a"]):
+            marker = "←" if tid == target_id_a else ""
             print(f"    {i+1:2}. '{tok}' ({prob:.4f}) {marker}")
 
         print()
 
-        # Stream B
-        target_in_top10_b = any(pos_info["target_token_b"] == t[0] for t in pos_info["top10_b"])
-        rank_b = next((i+1 for i, t in enumerate(pos_info["top10_b"]) if t[0] == pos_info["target_token_b"]), ">10")
+        # Stream B - compare by token ID
+        target_id_b = pos_info["target_id_b"]
+        rank_b = next((i+1 for i, (tid, tok, p) in enumerate(pos_info["top10_b"]) if tid == target_id_b), ">10")
         print(f"  Stream B: '{pos_info['input_token_b']}' → '{pos_info['target_token_b']}' (P={pos_info['target_prob_b']:.4f}, rank={rank_b})")
         print(f"  Top 10 predictions:")
-        for i, (tok, prob) in enumerate(pos_info["top10_b"]):
-            marker = "←" if tok == pos_info["target_token_b"] else ""
+        for i, (tid, tok, prob) in enumerate(pos_info["top10_b"]):
+            marker = "←" if tid == target_id_b else ""
             print(f"    {i+1:2}. '{tok}' ({prob:.4f}) {marker}")
 
         print()
 
 
 def compute_accuracy(analysis: dict) -> tuple[float, float]:
-    """Compute top-1 accuracy for both streams."""
+    """Compute top-1 accuracy for both streams using token ID comparison."""
     correct_a = 0
     correct_b = 0
     total = len(analysis["positions"])
 
     for pos_info in analysis["positions"]:
-        if pos_info["top10_a"] and pos_info["target_token_a"] == pos_info["top10_a"][0][0]:
+        # Compare by token ID, not string
+        if pos_info["top10_a"] and pos_info["target_id_a"] == pos_info["top10_a"][0][0]:
             correct_a += 1
-        if pos_info["top10_b"] and pos_info["target_token_b"] == pos_info["top10_b"][0][0]:
+        if pos_info["top10_b"] and pos_info["target_id_b"] == pos_info["top10_b"][0][0]:
             correct_b += 1
 
     acc_a = correct_a / total if total > 0 else 0
@@ -256,7 +269,7 @@ def main():
     print("Initializing tokenizer...")
     tokenizer = DualStreamTokenizer("words.txt", config.pidgin_vocab_size)
 
-    # Load validation data
+    # Load validation data - load more examples so we can sample from them
     print("Loading validation data...")
     training_config = TrainingConfig()
     val_dataloader = create_dataloader(
@@ -264,22 +277,36 @@ def main():
         config=config,
         training_config=training_config,
         split="validation",
-        max_examples=args.num_samples * 2,  # Load a bit more than needed
+        max_examples=max(100, args.num_samples * 10),  # Load enough to sample from
     )
 
-    # Analyze samples
+    # Collect all batches to sample from
+    print("Collecting samples...")
+    all_batches = list(val_dataloader)
+
+    # Create list of (batch_idx, sample_idx) for all samples
+    all_samples = []
+    for batch_idx, batch in enumerate(all_batches):
+        for sample_idx in range(len(batch.input_ids_a)):
+            all_samples.append((batch_idx, sample_idx))
+
+    # Shuffle and select samples (seed already set earlier if provided)
+    random.shuffle(all_samples)
+    selected_samples = all_samples[:args.num_samples]
+
+    print(f"Selected {len(selected_samples)} samples from {len(all_samples)} available")
     print()
-    batch = next(iter(val_dataloader))
 
     all_acc_a = []
     all_acc_b = []
 
-    for i in range(min(args.num_samples, len(batch.input_ids_a))):
+    for i, (batch_idx, sample_idx) in enumerate(selected_samples):
+        batch = all_batches[batch_idx]
         analysis = analyze_sample(
             model=model,
             tokenizer=tokenizer,
             batch=batch,
-            sample_idx=i,
+            sample_idx=sample_idx,
             config=config,
             device=device,
             max_display_tokens=args.max_tokens,
