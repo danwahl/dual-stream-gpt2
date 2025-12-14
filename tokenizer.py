@@ -138,9 +138,7 @@ class PidginTokenizer:
     Attributes:
         vocab_size: Number of tokens in this vocabulary.
         offset: Value added to raw token IDs (= main_vocab_size).
-        pad_token_id: Token ID for padding (with offset).
-        unk_token_id: Token ID for unknown (with offset).
-        eos_token_id: Token ID for end-of-sequence (with offset).
+        eos_token_id: Token ID for end-of-sequence (at end of pidgin range).
     """
 
     def __init__(self, vocab_size: int, offset: int) -> None:
@@ -151,10 +149,8 @@ class PidginTokenizer:
         # (same as MainTokenizer, but we'll add offset to outputs)
         self.tokenizer = _create_truncated_tokenizer(vocab_size)
 
-        # Special token IDs (with offset applied)
-        self.pad_token_id = offset + 0
-        self.unk_token_id = offset + 1
         # EOS at the END of pidgin range (mirrors main EOS at end of main range)
+        # No PAD/UNK needed: byte-level BPE can encode anything, padding via attention mask
         self.eos_token_id = offset + vocab_size - 1
 
     def encode(self, text: str) -> list[int]:
