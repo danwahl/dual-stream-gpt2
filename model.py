@@ -346,10 +346,10 @@ def verify_model(model: DualStreamGPT2) -> None:
     print(f"  Pidgin std matches init ({expected_std}): {abs(actual_std - expected_std) < 0.005}")
 
     # 3. Check EOS relocation
-    # Load fresh GPT-2 to compare
+    # Load fresh GPT-2 to compare (keep on CPU to avoid extra GPU memory)
     fresh_gpt2 = GPT2LMHeadModel.from_pretrained(model.config.gpt2_model_name)
     original_eos = fresh_gpt2.transformer.wte.weight[model.config.original_eos_id].detach()
-    relocated_eos = wte[model.config.main_eos_id].detach()
+    relocated_eos = wte[model.config.main_eos_id].detach().cpu()  # move to CPU for comparison
 
     eos_match = torch.allclose(original_eos, relocated_eos, atol=1e-6)
     print()
