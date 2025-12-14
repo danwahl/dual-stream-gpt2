@@ -1,30 +1,30 @@
 """
 Dual-stream tokenizers for the Dual-Stream GPT-2 experiment.
 
-Stream A (Main): Truncated GPT-2 BPE tokenizer, tokens 0 to (GPT2_VOCAB - pidgin_size - 1)
-Stream B (Pidgin): BPE tokenizer trained on words.txt, tokens offset by main vocab size
+Both streams use truncated GPT-2 BPE tokenizers with different token ranges:
+- Stream A (Main): tokens 0 to (GPT2_VOCAB - pidgin_size - 1)
+- Stream B (Pidgin): tokens (GPT2_VOCAB - pidgin_size) to (GPT2_VOCAB - 1)
 
 The vocab sizes are parameterized so the relative sizes can be adjusted for testing.
-Default: 1000 pidgin tokens, leaving 49,257 main tokens.
+Default: 10,000 pidgin tokens, leaving 40,257 main tokens.
 
 Usage:
     from tokenizer import DualStreamTokenizer
 
-    tokenizer = DualStreamTokenizer("words.txt", pidgin_vocab_size=1000)
+    tokenizer = DualStreamTokenizer(pidgin_vocab_size=10000)
     main_ids = tokenizer.encode_main("Hello world")
     pidgin_ids = tokenizer.encode_pidgin("the big thing")
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from transformers import GPT2Tokenizer
-from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders, normalizers
+from tokenizers import Tokenizer, models, pre_tokenizers, decoders
 
 if TYPE_CHECKING:
-    from tokenizers import Encoding
+    pass
 
 __all__ = [
     "GPT2_VOCAB_SIZE",
@@ -41,7 +41,7 @@ __all__ = [
 GPT2_VOCAB_SIZE = 50257
 """Total vocabulary size of GPT-2 (256 bytes + 50,001 merges)."""
 
-DEFAULT_PIDGIN_VOCAB_SIZE = 1000
+DEFAULT_PIDGIN_VOCAB_SIZE = 10000
 """Default number of tokens reserved for the pidgin (Stream B) vocabulary."""
 
 
@@ -49,33 +49,69 @@ DEFAULT_PIDGIN_VOCAB_SIZE = 1000
 # Internal helpers
 # =============================================================================
 
-def _create_truncated_main_tokenizer(main_vocab_size: int) -> Tokenizer:
+def _create_truncated_tokenizer(
+    start_token: int,
+    end_token: int,
+) -> Tokenizer:
     """
-    Create a truncated BPE tokenizer for Stream A using GPT-2's vocab.
+    Create a truncated BPE tokenizer using a subset of GPT-2's vocab.
 
-    Uses only the first `main_vocab_size` tokens by truncating the merge list.
-    Rare patterns that would produce higher token IDs naturally fall back
-    to their component tokens.
+    Uses tokens from start_token to end_token-1 (inclusive). The tokenizer
+    will only produce tokens in this range by using a truncated merge list.
+
+    For Stream A (start=0), rare patterns that would produce higher token IDs
+    naturally fall back to their component tokens.
+
+    For Stream B (start>0), we remap the vocab so that encoding produces
+    local IDs [0, vocab_size), and the caller applies the offset.
 
     Args:
-        main_vocab_size: Number of tokens to include (256 bytes + N merges).
+        start_token: First token ID to include.
+        end_token: One past the last token ID to include.
 
     Returns:
-        A configured BPE tokenizer.
+        A configured BPE tokenizer with local IDs [0, end_token - start_token).
     """
     gpt2_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    vocab_size = end_token - start_token
 
-    # Extract first main_vocab_size tokens from vocabulary
-    vocab = {
-        token: token_id
-        for token, token_id in gpt2_tokenizer.encoder.items()
-        if token_id < main_vocab_size
-    }
+    if start_token == 0:
+        # Stream A: Use first N tokens directly
+        vocab = {
+            token: token_id
+            for token, token_id in gpt2_tokenizer.encoder.items()
+            if token_id < end_token
+        }
 
-    # Truncate merge list: need (main_vocab_size - 256) merges
-    num_merges = main_vocab_size - 256
-    sorted_merges = sorted(gpt2_tokenizer.bpe_ranks.items(), key=lambda x: x[1])
-    truncated_merges = [pair for pair, _rank in sorted_merges[:num_merges]]
+        # Truncate merge list: need (vocab_size - 256) merges
+        num_merges = vocab_size - 256
+        sorted_merges = sorted(gpt2_tokenizer.bpe_ranks.items(), key=lambda x: x[1])
+        truncated_merges = [pair for pair, _rank in sorted_merges[:num_merges]]
+    else:
+        # Stream B: Use tokens from upper portion, remapped to local IDs [0, vocab_size)
+        # We take the LAST vocab_size tokens from GPT-2's vocabulary
+        vocab = {}
+        for token, token_id in gpt2_tokenizer.encoder.items():
+            if start_token <= token_id < end_token:
+                # Remap to local index
+                local_id = token_id - start_token
+                vocab[token] = local_id
+
+        # For Stream B, we use all merges but they'll only produce tokens in our vocab
+        # Merges that would produce tokens outside our range won't apply
+        # We need merges that produce tokens in [start_token, end_token)
+        # The merge list is ordered by frequency, and later merges produce higher token IDs
+        # We want merges that produce token IDs >= start_token
+        sorted_merges = sorted(gpt2_tokenizer.bpe_ranks.items(), key=lambda x: x[1])
+
+        # Find which merges produce tokens in our range
+        # Merge i produces token (256 + i), so we need merges where 256 + i >= start_token
+        # and 256 + i < end_token
+        truncated_merges = []
+        for pair, rank in sorted_merges:
+            produced_token = 256 + rank
+            if start_token <= produced_token < end_token:
+                truncated_merges.append(pair)
 
     # Build tokenizer
     tokenizer = Tokenizer(
@@ -83,37 +119,6 @@ def _create_truncated_main_tokenizer(main_vocab_size: int) -> Tokenizer:
     )
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tokenizer.decoder = decoders.ByteLevel()
-
-    return tokenizer
-
-
-def _train_pidgin_tokenizer(corpus_path: Path, vocab_size: int) -> Tokenizer:
-    """
-    Train a BPE tokenizer on the pidgin corpus.
-
-    The pidgin tokenizer lowercases all input since it uses a compressed
-    vocabulary focused on common words.
-
-    Args:
-        corpus_path: Path to the training corpus (e.g., words.txt).
-        vocab_size: Target vocabulary size.
-
-    Returns:
-        A trained BPE tokenizer with token IDs 0 to vocab_size-1.
-    """
-    tokenizer = Tokenizer(models.BPE())
-    # Lowercase all input for the pidgin stream (compressed vocab)
-    tokenizer.normalizer = normalizers.Lowercase()
-    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
-    tokenizer.decoder = decoders.ByteLevel()
-
-    trainer = trainers.BpeTrainer(
-        vocab_size=vocab_size,
-        min_frequency=1,
-        special_tokens=["<PAD>", "<UNK>", "<EOS>"],
-        initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
-    )
-    tokenizer.train([str(corpus_path)], trainer)
 
     return tokenizer
 
@@ -137,7 +142,7 @@ class MainTokenizer:
 
     def __init__(self, vocab_size: int) -> None:
         self.vocab_size = vocab_size
-        self.tokenizer = _create_truncated_main_tokenizer(vocab_size)
+        self.tokenizer = _create_truncated_tokenizer(0, vocab_size)
 
     def encode(self, text: str) -> list[int]:
         """Encode text to token IDs (all guaranteed < vocab_size)."""
@@ -155,33 +160,29 @@ class MainTokenizer:
 
 class PidginTokenizer:
     """
-    BPE tokenizer for Stream B (pidgin vocabulary).
+    Truncated BPE tokenizer for Stream B (pidgin vocabulary).
 
-    Trained on a custom corpus (e.g., Thing Explainer words). Token IDs are
-    offset by main_vocab_size so they occupy the range [offset, offset + vocab_size).
-
-    All input is automatically lowercased since the pidgin stream uses a
-    compressed vocabulary focused on common words.
+    Uses the upper portion of GPT-2's vocabulary, remapped to local IDs.
+    Token IDs are offset by main_vocab_size so they occupy the range
+    [offset, offset + vocab_size).
 
     Attributes:
         vocab_size: Number of tokens in this vocabulary.
         offset: Value added to raw token IDs (= main_vocab_size).
-        pad_token_id: Token ID for <PAD> (with offset).
-        unk_token_id: Token ID for <UNK> (with offset).
-        eos_token_id: Token ID for <EOS> (with offset).
+        pad_token_id: Token ID for padding (with offset).
+        unk_token_id: Token ID for unknown (with offset).
+        eos_token_id: Token ID for end-of-sequence (with offset).
     """
 
-    def __init__(self, corpus_path: str | Path, vocab_size: int, offset: int) -> None:
-        self.corpus_path = Path(corpus_path)
+    def __init__(self, vocab_size: int, offset: int) -> None:
         self.vocab_size = vocab_size
         self.offset = offset
 
-        if not self.corpus_path.exists():
-            raise FileNotFoundError(f"Corpus file not found: {self.corpus_path}")
-
-        self.tokenizer = _train_pidgin_tokenizer(self.corpus_path, vocab_size)
+        # Create tokenizer using upper portion of GPT-2 vocab
+        self.tokenizer = _create_truncated_tokenizer(offset, offset + vocab_size)
 
         # Special token IDs (with offset applied)
+        # These are the first few local tokens, offset to global range
         self.pad_token_id = offset + 0
         self.unk_token_id = offset + 1
         self.eos_token_id = offset + 2
@@ -217,9 +218,10 @@ class DualStreamTokenizer:
     - Stream A (main): tokens 0 to main_vocab_size - 1
     - Stream B (pidgin): tokens main_vocab_size to GPT2_VOCAB_SIZE - 1
 
+    Both streams use truncated GPT-2 BPE, ensuring well-trained subword merges.
+
     Args:
-        pidgin_corpus_path: Path to the pidgin training corpus.
-        pidgin_vocab_size: Number of tokens for Stream B (default: 1000).
+        pidgin_vocab_size: Number of tokens for Stream B (default: 10000).
 
     Attributes:
         main_vocab_size: Derived as GPT2_VOCAB_SIZE - pidgin_vocab_size.
@@ -230,7 +232,6 @@ class DualStreamTokenizer:
 
     def __init__(
         self,
-        pidgin_corpus_path: str | Path = "words.txt",
         pidgin_vocab_size: int = DEFAULT_PIDGIN_VOCAB_SIZE,
     ) -> None:
         self.main_vocab_size = GPT2_VOCAB_SIZE - pidgin_vocab_size
@@ -238,7 +239,6 @@ class DualStreamTokenizer:
 
         self.main = MainTokenizer(self.main_vocab_size)
         self.pidgin = PidginTokenizer(
-            pidgin_corpus_path,
             pidgin_vocab_size,
             offset=self.main_vocab_size,
         )
@@ -286,12 +286,12 @@ def verify_tokenizers(dual_tokenizer: DualStreamTokenizer) -> bool:
     print("=" * 60)
     print()
     print(f"GPT-2 total vocab: {GPT2_VOCAB_SIZE:,}")
-    print(f"Stream A (main):   {main_size:,} tokens (IDs 0–{main_size - 1})")
-    print(f"Stream B (pidgin): {pidgin_size:,} tokens (IDs {pidgin_offset}–{pidgin_offset + pidgin_size - 1})")
+    print(f"Stream A (main):   {main_size:,} tokens (IDs 0-{main_size - 1})")
+    print(f"Stream B (pidgin): {pidgin_size:,} tokens (IDs {pidgin_offset}-{pidgin_offset + pidgin_size - 1})")
     print()
 
-    # Sample pidgin vocabulary
-    print("Sample pidgin vocabulary:")
+    # Sample pidgin vocabulary (first 15 tokens)
+    print("Sample pidgin vocabulary (first 15 tokens):")
     pidgin_vocab = dual_tokenizer.pidgin.get_vocab()
     for token, token_id in sorted(pidgin_vocab.items(), key=lambda x: x[1])[:15]:
         print(f"  {token_id}: {token!r}")
@@ -307,25 +307,21 @@ def verify_tokenizers(dual_tokenizer: DualStreamTokenizer) -> bool:
         print(f"    Tokens: {tokens}")
     print()
 
-    # Truncation test: show that rare words get decomposed
-    print("Truncation test (rare patterns decompose into subwords):")
-    # These are words/patterns that likely have high token IDs in GPT-2
-    # and should decompose with our truncated vocabulary
+    # Truncation test for Stream A: show that rare words get decomposed
+    print("Stream A truncation test (rare patterns decompose into subwords):")
     rare_patterns = [
         "cryptocurrency",  # technical jargon
         "biodegradable",   # compound word
         "quinoa",          # uncommon word
-        "László",          # non-ASCII name
-        "2024年",          # mixed script
     ]
     for pattern in rare_patterns:
         ids, tokens = dual_tokenizer.main.encode_with_tokens(pattern)
         print(f"  '{pattern}' -> {tokens} ({len(tokens)} tokens)")
     print()
 
-    # Stream B examples (note: input is lowercased automatically)
-    print("Stream B (Pidgin) examples (auto-lowercased):")
-    for text in ["The Big Red Thing", "UNDERSTANDING the World", "Hello unknown123"]:
+    # Stream B examples
+    print("Stream B (Pidgin) examples:")
+    for text in ["The Big Red Thing", "Understanding the World", "Hello there"]:
         ids, tokens = dual_tokenizer.pidgin.encode_with_tokens(text)
         print(f"  '{text}'")
         print(f"    IDs:    {ids}")
@@ -340,8 +336,8 @@ def verify_tokenizers(dual_tokenizer: DualStreamTokenizer) -> bool:
     assert all(id < main_size for id in main_ids), f"Main IDs must be < {main_size}"
     assert all(id >= pidgin_offset for id in pidgin_ids), f"Pidgin IDs must be >= {pidgin_offset}"
 
-    print(f"  Main IDs:   {main_ids} (all < {main_size}) ✓")
-    print(f"  Pidgin IDs: {pidgin_ids} (all >= {pidgin_offset}) ✓")
+    print(f"  Main IDs:   {main_ids} (all < {main_size})")
+    print(f"  Pidgin IDs: {pidgin_ids} (all >= {pidgin_offset})")
     print()
     print("Verification passed!")
     return True
@@ -351,20 +347,13 @@ def main() -> None:
     """CLI entry point."""
     import sys
 
-    corpus_path = sys.argv[1] if len(sys.argv) > 1 else "words.txt"
-    pidgin_size = int(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_PIDGIN_VOCAB_SIZE
+    pidgin_size = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PIDGIN_VOCAB_SIZE
 
-    print(f"Corpus: {corpus_path}")
     print(f"Pidgin vocab size: {pidgin_size}")
     print()
 
-    try:
-        tokenizer = DualStreamTokenizer(corpus_path, pidgin_size)
-        verify_tokenizers(tokenizer)
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        print("Usage: python tokenizer.py [corpus_path] [pidgin_vocab_size]")
-        sys.exit(1)
+    tokenizer = DualStreamTokenizer(pidgin_size)
+    verify_tokenizers(tokenizer)
 
 
 if __name__ == "__main__":

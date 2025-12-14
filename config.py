@@ -14,12 +14,12 @@ from dataclasses import dataclass
 GPT2_VOCAB_SIZE = 50257
 """Total vocabulary size of GPT-2."""
 
-DEFAULT_PIDGIN_VOCAB_SIZE = 1000
+DEFAULT_PIDGIN_VOCAB_SIZE = 10000
 """Default number of tokens for Stream B (pidgin vocabulary)."""
 
-# Derived constants (for default config)
-# Main vocab: 0 to 49,256 (49,257 tokens)
-# Pidgin vocab: 49,257 to 50,256 (1,000 tokens)
+# Derived constants (for default config with 10K pidgin)
+# Main vocab: 0 to 40,256 (40,257 tokens)
+# Pidgin vocab: 40,257 to 50,256 (10,000 tokens)
 
 
 # =============================================================================

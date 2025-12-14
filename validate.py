@@ -267,7 +267,7 @@ def main():
 
     # Tokenizer
     print("Initializing tokenizer...")
-    tokenizer = DualStreamTokenizer("words.txt", config.pidgin_vocab_size)
+    tokenizer = DualStreamTokenizer(config.pidgin_vocab_size)
 
     # Load validation data - load more examples so we can sample from them
     print("Loading validation data...")

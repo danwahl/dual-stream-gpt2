@@ -412,7 +412,7 @@ def main():
 
     # Tokenizer
     print("Initializing tokenizer...")
-    tokenizer = DualStreamTokenizer("words.txt", config.pidgin_vocab_size)
+    tokenizer = DualStreamTokenizer(config.pidgin_vocab_size)
 
     # Model
     print("Loading model...")
