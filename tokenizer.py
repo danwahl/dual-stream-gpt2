@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from transformers import GPT2Tokenizer
-from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
+from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders, normalizers
 
 if TYPE_CHECKING:
     from tokenizers import Encoding
@@ -91,6 +91,9 @@ def _train_pidgin_tokenizer(corpus_path: Path, vocab_size: int) -> Tokenizer:
     """
     Train a BPE tokenizer on the pidgin corpus.
 
+    The pidgin tokenizer lowercases all input since it uses a compressed
+    vocabulary focused on common words.
+
     Args:
         corpus_path: Path to the training corpus (e.g., words.txt).
         vocab_size: Target vocabulary size.
@@ -99,6 +102,8 @@ def _train_pidgin_tokenizer(corpus_path: Path, vocab_size: int) -> Tokenizer:
         A trained BPE tokenizer with token IDs 0 to vocab_size-1.
     """
     tokenizer = Tokenizer(models.BPE())
+    # Lowercase all input for the pidgin stream (compressed vocab)
+    tokenizer.normalizer = normalizers.Lowercase()
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tokenizer.decoder = decoders.ByteLevel()
 
@@ -154,6 +159,9 @@ class PidginTokenizer:
 
     Trained on a custom corpus (e.g., Thing Explainer words). Token IDs are
     offset by main_vocab_size so they occupy the range [offset, offset + vocab_size).
+
+    All input is automatically lowercased since the pidgin stream uses a
+    compressed vocabulary focused on common words.
 
     Attributes:
         vocab_size: Number of tokens in this vocabulary.
@@ -299,22 +307,25 @@ def verify_tokenizers(dual_tokenizer: DualStreamTokenizer) -> bool:
         print(f"    Tokens: {tokens}")
     print()
 
-    # Truncation test
-    print("Truncation test (tokens that decompose):")
-    gpt2_tok = GPT2Tokenizer.from_pretrained("gpt2")
-    rare = [
-        (tok, tid) for tok, tid in gpt2_tok.encoder.items()
-        if tid >= main_size and tid < GPT2_VOCAB_SIZE
-        and tok.isprintable() and len(tok) > 2
-    ][:5]
-    for token, orig_id in rare:
-        ids, tokens = dual_tokenizer.main.encode_with_tokens(token)
-        print(f"  '{token}' (GPT-2 ID {orig_id}) -> {tokens}")
+    # Truncation test: show that rare words get decomposed
+    print("Truncation test (rare patterns decompose into subwords):")
+    # These are words/patterns that likely have high token IDs in GPT-2
+    # and should decompose with our truncated vocabulary
+    rare_patterns = [
+        "cryptocurrency",  # technical jargon
+        "biodegradable",   # compound word
+        "quinoa",          # uncommon word
+        "László",          # non-ASCII name
+        "2024年",          # mixed script
+    ]
+    for pattern in rare_patterns:
+        ids, tokens = dual_tokenizer.main.encode_with_tokens(pattern)
+        print(f"  '{pattern}' -> {tokens} ({len(tokens)} tokens)")
     print()
 
-    # Stream B examples
-    print("Stream B (Pidgin) examples:")
-    for text in ["the big red thing", "understanding the world", "hello unknown123"]:
+    # Stream B examples (note: input is lowercased automatically)
+    print("Stream B (Pidgin) examples (auto-lowercased):")
+    for text in ["The Big Red Thing", "UNDERSTANDING the World", "Hello unknown123"]:
         ids, tokens = dual_tokenizer.pidgin.encode_with_tokens(text)
         print(f"  '{text}'")
         print(f"    IDs:    {ids}")
