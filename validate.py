@@ -7,12 +7,14 @@ predicted tokens for both streams.
 
 Usage:
     python validate.py checkpoints/best_model.pt --num_samples 5
+    python validate.py checkpoints/best_model.pt --num_samples 5 --seed 42
 """
 
 from __future__ import annotations
 
 import argparse
 import math
+import random
 from pathlib import Path
 
 import torch
@@ -233,7 +235,16 @@ def main():
     parser.add_argument("checkpoint", type=str, help="Path to checkpoint file")
     parser.add_argument("--num_samples", type=int, default=5, help="Number of samples to analyze")
     parser.add_argument("--max_tokens", type=int, default=30, help="Max tokens to display per sample")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducible sampling")
     args = parser.parse_args()
+
+    # Set random seeds if provided
+    if args.seed is not None:
+        random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        print(f"Using seed: {args.seed}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
