@@ -27,7 +27,7 @@ from dataset import create_dataloader
 def load_model_from_checkpoint(checkpoint_path: Path, device: torch.device) -> DualStreamGPT2:
     """Load model from checkpoint."""
     print(f"Loading checkpoint: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     # Get config from checkpoint or use default
     config = checkpoint.get("config", DualStreamConfig())

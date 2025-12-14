@@ -17,7 +17,7 @@ from pathlib import Path
 
 import torch
 from torch.optim import AdamW
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 
 from config import DualStreamConfig, TrainingConfig
 from model import DualStreamGPT2
@@ -110,7 +110,7 @@ def train(
     )
 
     # Mixed precision
-    scaler = GradScaler() if training_config.fp16 else None
+    scaler = GradScaler('cuda') if training_config.fp16 else None
 
     # Training state
     global_step = 0
@@ -156,7 +156,7 @@ def train(
 
             # Forward pass with mixed precision
             if training_config.fp16:
-                with autocast():
+                with autocast('cuda'):
                     output = model(
                         input_ids_a=batch.input_ids_a,
                         input_ids_b=batch.input_ids_b,
@@ -286,7 +286,7 @@ def evaluate(
             batch = batch.to(device)
 
             if training_config.fp16:
-                with autocast():
+                with autocast('cuda'):
                     output = model(
                         input_ids_a=batch.input_ids_a,
                         input_ids_b=batch.input_ids_b,
@@ -344,7 +344,7 @@ def load_checkpoint(
     scheduler = None,
 ) -> int:
     """Load a training checkpoint. Returns global_step."""
-    checkpoint = torch.load(path)
+    checkpoint = torch.load(path, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
     if optimizer:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -434,7 +434,7 @@ def main():
 
         if checkpoint_path is not None:
             print(f"Loading checkpoint: {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path, map_location=device)
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
             model.load_state_dict(checkpoint["model_state_dict"])
             resume_step = checkpoint.get("global_step", 0)
             print(f"Resuming from step {resume_step}")
