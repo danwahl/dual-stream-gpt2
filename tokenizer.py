@@ -1,11 +1,13 @@
 """
 Dual-stream tokenizers for the Dual-Stream GPT-2 experiment.
 
-Both streams use truncated GPT-2 BPE tokenizers with different token ranges:
-- Stream A (Main): tokens 0 to (GPT2_VOCAB - pidgin_size - 1)
-- Stream B (Pidgin): tokens (GPT2_VOCAB - pidgin_size) to (GPT2_VOCAB - 1)
+Both streams use truncated GPT-2 BPE tokenizers:
+- Stream A (Main): First N tokens (0 to main_vocab_size - 1)
+- Stream B (Pidgin): First M tokens, offset to (main_vocab_size to main_vocab_size + pidgin_vocab_size - 1)
 
-The vocab sizes are parameterized so the relative sizes can be adjusted for testing.
+Both streams use the most common/well-trained GPT-2 BPE merges. Stream B's tokens
+are offset so they don't overlap with Stream A in the embedding space.
+
 Default: 10,000 pidgin tokens, leaving 40,257 main tokens.
 
 Usage:
@@ -49,69 +51,34 @@ DEFAULT_PIDGIN_VOCAB_SIZE = 10000
 # Internal helpers
 # =============================================================================
 
-def _create_truncated_tokenizer(
-    start_token: int,
-    end_token: int,
-) -> Tokenizer:
+def _create_truncated_tokenizer(vocab_size: int) -> Tokenizer:
     """
-    Create a truncated BPE tokenizer using a subset of GPT-2's vocab.
+    Create a truncated BPE tokenizer using the first N tokens of GPT-2's vocab.
 
-    Uses tokens from start_token to end_token-1 (inclusive). The tokenizer
-    will only produce tokens in this range by using a truncated merge list.
-
-    For Stream A (start=0), rare patterns that would produce higher token IDs
-    naturally fall back to their component tokens.
-
-    For Stream B (start>0), we remap the vocab so that encoding produces
-    local IDs [0, vocab_size), and the caller applies the offset.
+    Uses only the first `vocab_size` tokens by truncating the merge list.
+    Rare patterns that would produce higher token IDs naturally fall back
+    to their component tokens.
 
     Args:
-        start_token: First token ID to include.
-        end_token: One past the last token ID to include.
+        vocab_size: Number of tokens to include (256 bytes + N merges).
 
     Returns:
-        A configured BPE tokenizer with local IDs [0, end_token - start_token).
+        A configured BPE tokenizer with IDs [0, vocab_size).
     """
     gpt2_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-    vocab_size = end_token - start_token
 
-    if start_token == 0:
-        # Stream A: Use first N tokens directly
-        vocab = {
-            token: token_id
-            for token, token_id in gpt2_tokenizer.encoder.items()
-            if token_id < end_token
-        }
+    # Extract first vocab_size tokens from vocabulary
+    vocab = {
+        token: token_id
+        for token, token_id in gpt2_tokenizer.encoder.items()
+        if token_id < vocab_size
+    }
 
-        # Truncate merge list: need (vocab_size - 256) merges
-        num_merges = vocab_size - 256
-        sorted_merges = sorted(gpt2_tokenizer.bpe_ranks.items(), key=lambda x: x[1])
-        truncated_merges = [pair for pair, _rank in sorted_merges[:num_merges]]
-    else:
-        # Stream B: Use tokens from upper portion, remapped to local IDs [0, vocab_size)
-        # We take the LAST vocab_size tokens from GPT-2's vocabulary
-        vocab = {}
-        for token, token_id in gpt2_tokenizer.encoder.items():
-            if start_token <= token_id < end_token:
-                # Remap to local index
-                local_id = token_id - start_token
-                vocab[token] = local_id
-
-        # For Stream B, we use all merges but they'll only produce tokens in our vocab
-        # Merges that would produce tokens outside our range won't apply
-        # We need merges that produce tokens in [start_token, end_token)
-        # The merge list is ordered by frequency, and later merges produce higher token IDs
-        # We want merges that produce token IDs >= start_token
-        sorted_merges = sorted(gpt2_tokenizer.bpe_ranks.items(), key=lambda x: x[1])
-
-        # Find which merges produce tokens in our range
-        # Merge i produces token (256 + i), so we need merges where 256 + i >= start_token
-        # and 256 + i < end_token
-        truncated_merges = []
-        for pair, rank in sorted_merges:
-            produced_token = 256 + rank
-            if start_token <= produced_token < end_token:
-                truncated_merges.append(pair)
+    # Truncate merge list: need (vocab_size - 256) merges
+    # (first 256 tokens are byte-level, merges start producing token 256+)
+    num_merges = max(0, vocab_size - 256)
+    sorted_merges = sorted(gpt2_tokenizer.bpe_ranks.items(), key=lambda x: x[1])
+    truncated_merges = [pair for pair, _rank in sorted_merges[:num_merges]]
 
     # Build tokenizer
     tokenizer = Tokenizer(
@@ -142,7 +109,7 @@ class MainTokenizer:
 
     def __init__(self, vocab_size: int) -> None:
         self.vocab_size = vocab_size
-        self.tokenizer = _create_truncated_tokenizer(0, vocab_size)
+        self.tokenizer = _create_truncated_tokenizer(vocab_size)
 
     def encode(self, text: str) -> list[int]:
         """Encode text to token IDs (all guaranteed < vocab_size)."""
@@ -162,9 +129,11 @@ class PidginTokenizer:
     """
     Truncated BPE tokenizer for Stream B (pidgin vocabulary).
 
-    Uses the upper portion of GPT-2's vocabulary, remapped to local IDs.
-    Token IDs are offset by main_vocab_size so they occupy the range
-    [offset, offset + vocab_size).
+    Uses the first N tokens of GPT-2's vocabulary (the most common merges),
+    then offsets token IDs to occupy [offset, offset + vocab_size).
+
+    This gives Stream B access to well-trained BPE merges while keeping
+    token IDs separate from Stream A.
 
     Attributes:
         vocab_size: Number of tokens in this vocabulary.
@@ -178,8 +147,9 @@ class PidginTokenizer:
         self.vocab_size = vocab_size
         self.offset = offset
 
-        # Create tokenizer using upper portion of GPT-2 vocab
-        self.tokenizer = _create_truncated_tokenizer(offset, offset + vocab_size)
+        # Create tokenizer using first vocab_size tokens of GPT-2
+        # (same as MainTokenizer, but we'll add offset to outputs)
+        self.tokenizer = _create_truncated_tokenizer(vocab_size)
 
         # Special token IDs (with offset applied)
         # These are the first few local tokens, offset to global range
@@ -216,9 +186,10 @@ class DualStreamTokenizer:
 
     Partitions GPT-2's embedding space between main and pidgin vocabularies:
     - Stream A (main): tokens 0 to main_vocab_size - 1
-    - Stream B (pidgin): tokens main_vocab_size to GPT2_VOCAB_SIZE - 1
+    - Stream B (pidgin): tokens main_vocab_size to main_vocab_size + pidgin_vocab_size - 1
 
-    Both streams use truncated GPT-2 BPE, ensuring well-trained subword merges.
+    Both streams use truncated GPT-2 BPE with the most common merges.
+    Stream B's tokens are offset to avoid overlap with Stream A.
 
     Args:
         pidgin_vocab_size: Number of tokens for Stream B (default: 10000).
@@ -291,7 +262,7 @@ def verify_tokenizers(dual_tokenizer: DualStreamTokenizer) -> bool:
     print()
 
     # Sample pidgin vocabulary (first 15 tokens)
-    print("Sample pidgin vocabulary (first 15 tokens):")
+    print("Sample pidgin vocabulary (first 15 tokens after offset):")
     pidgin_vocab = dual_tokenizer.pidgin.get_vocab()
     for token, token_id in sorted(pidgin_vocab.items(), key=lambda x: x[1])[:15]:
         print(f"  {token_id}: {token!r}")
