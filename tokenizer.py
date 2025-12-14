@@ -152,10 +152,10 @@ class PidginTokenizer:
         self.tokenizer = _create_truncated_tokenizer(vocab_size)
 
         # Special token IDs (with offset applied)
-        # These are the first few local tokens, offset to global range
         self.pad_token_id = offset + 0
         self.unk_token_id = offset + 1
-        self.eos_token_id = offset + 2
+        # EOS at the END of pidgin range (mirrors main EOS at end of main range)
+        self.eos_token_id = offset + vocab_size - 1
 
     def encode(self, text: str) -> list[int]:
         """Encode text to token IDs (offset applied)."""

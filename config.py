@@ -63,9 +63,10 @@ class DualStreamConfig:
 
         # Stream B special tokens (with offset)
         self.pidgin_offset = self.main_vocab_size
-        self.pidgin_pad_id = self.pidgin_offset + 0   # 49257
-        self.pidgin_unk_id = self.pidgin_offset + 1   # 49258
-        self.pidgin_eos_id = self.pidgin_offset + 2   # 49259
+        self.pidgin_pad_id = self.pidgin_offset + 0   # 40257 (with 10K pidgin)
+        self.pidgin_unk_id = self.pidgin_offset + 1   # 40258
+        # EOS at the END of pidgin range (mirrors main EOS at end of main range)
+        self.pidgin_eos_id = GPT2_VOCAB_SIZE - 1      # 50256 (last token in full vocab)
 
         # Original GPT-2 EOS location (for copying during init)
         self.original_eos_id = 50256
