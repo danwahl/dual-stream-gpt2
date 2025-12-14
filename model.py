@@ -175,6 +175,21 @@ class DualStreamGPT2(nn.Module):
         # We bypass the normal GPT2 forward and directly use transformer blocks
         hidden = self.gpt2.transformer.drop(combined)
 
+        # Convert attention mask to 4D causal mask format expected by GPT-2
+        # Shape: (batch, 1, seq_len, seq_len) with 0.0 for attend, -10000.0 for mask
+        if attention_mask is not None:
+            # attention_mask is (batch, seq_len) with 1=attend, 0=mask
+            batch_size, seq_len = attention_mask.shape
+            # Create causal mask
+            causal_mask = torch.tril(
+                torch.ones((seq_len, seq_len), device=attention_mask.device)
+            )
+            # Combine with padding mask: (batch, 1, 1, seq_len) * (1, 1, seq_len, seq_len)
+            attention_mask_4d = attention_mask[:, None, None, :] * causal_mask[None, None, :, :]
+            # Convert to additive mask: 0 -> -10000, 1 -> 0
+            attention_mask_4d = (1.0 - attention_mask_4d) * -10000.0
+            attention_mask = attention_mask_4d.to(hidden.dtype)
+
         for block in self.gpt2.transformer.h:
             outputs = block(hidden, attention_mask=attention_mask)
             hidden = outputs[0]
