@@ -13,11 +13,16 @@ from __future__ import annotations
 import argparse
 import math
 import time
+import warnings
 from pathlib import Path
 
 import torch
 from torch.optim import AdamW
 from torch.amp import GradScaler, autocast
+
+# Suppress false positive warning when resuming from checkpoint
+# (we do call optimizer.step() before scheduler.step())
+warnings.filterwarnings("ignore", message="Detected call of `lr_scheduler.step\\(\\)` before")
 
 from config import DualStreamConfig, TrainingConfig
 from model import DualStreamGPT2
