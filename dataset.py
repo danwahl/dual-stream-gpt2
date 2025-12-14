@@ -223,11 +223,10 @@ def create_dataloader(
         max_examples=max_examples,
     )
 
-    # Padding tokens
-    # Stream A: use token 0 (GPT-2 convention, though it's not a special pad token)
-    # Stream B: use the dedicated PAD token
-    pad_token_a = 0  # Could also use config.main_eos_id
-    pad_token_b = config.pidgin_pad_id
+    # Padding tokens (actual value doesn't matter since we use attention mask)
+    # Both streams use byte-level BPE, no special pad token needed
+    pad_token_a = 0
+    pad_token_b = config.pidgin_offset  # First token in pidgin range
 
     def collate(batch):
         return collate_fn(
@@ -294,7 +293,7 @@ def main() -> None:
     training_config = TrainingConfig()
 
     print("Initializing tokenizer...")
-    tokenizer = DualStreamTokenizer("words.txt", config.pidgin_vocab_size)
+    tokenizer = DualStreamTokenizer(config.pidgin_vocab_size)
 
     print()
     dataloader = create_dataloader(
