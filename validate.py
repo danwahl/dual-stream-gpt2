@@ -120,26 +120,26 @@ def analyze_sample(
         prob_a = probs_a[pos, target_a].item()
         prob_b = probs_b[pos, target_b_local].item() if target_b_local >= 0 else 0.0
 
-        # Get top-5 predictions
-        top5_a = torch.topk(probs_a[pos], k=5)
-        top5_b = torch.topk(probs_b[pos], k=5)
+        # Get top-10 predictions
+        top10_a = torch.topk(probs_a[pos], k=10)
+        top10_b = torch.topk(probs_b[pos], k=10)
 
         # Decode top predictions
-        top5_a_tokens = []
-        for tid, p in zip(top5_a.indices.tolist(), top5_a.values.tolist()):
+        top10_a_tokens = []
+        for tid, p in zip(top10_a.indices.tolist(), top10_a.values.tolist()):
             try:
                 tok_str = tokenizer.main.decode([tid])
             except:
                 tok_str = f"<{tid}>"
-            top5_a_tokens.append((tok_str, p))
+            top10_a_tokens.append((tok_str, p))
 
-        top5_b_tokens = []
-        for tid, p in zip(top5_b.indices.tolist(), top5_b.values.tolist()):
+        top10_b_tokens = []
+        for tid, p in zip(top10_b.indices.tolist(), top10_b.values.tolist()):
             try:
                 tok_str = tokenizer.pidgin.decode([tid + config.main_vocab_size])
             except:
                 tok_str = f"<{tid}>"
-            top5_b_tokens.append((tok_str, p))
+            top10_b_tokens.append((tok_str, p))
 
         pos_info = {
             "pos": pos,
@@ -151,8 +151,8 @@ def analyze_sample(
             "target_prob_b": prob_b,
             "target_logprob_a": math.log(prob_a) if prob_a > 0 else float("-inf"),
             "target_logprob_b": math.log(prob_b) if prob_b > 0 else float("-inf"),
-            "top5_a": top5_a_tokens,
-            "top5_b": top5_b_tokens,
+            "top10_a": top10_a_tokens,
+            "top10_b": top10_b_tokens,
         }
         analysis["positions"].append(pos_info)
 
@@ -180,40 +180,35 @@ def print_analysis(analysis: dict, sample_num: int) -> None:
         print(f"Loss: {analysis['loss']:.4f} | Loss_A: {analysis['loss_a']:.4f} (ppl={ppl_a:.2f}) | Loss_B: {analysis['loss_b']:.4f} (ppl={ppl_b:.2f})")
         print()
 
-    # Show first few positions in detail
-    print("Position-by-position analysis (first 10 positions):")
-    print("-" * 80)
-    print(f"{'Pos':>3} | {'Input A':>12} | {'Target A':>12} | {'P(tgt)':>8} | {'Top prediction A':>20}")
-    print("-" * 80)
+    # Show first few positions in detail with top 10 predictions
+    print("Position-by-position analysis (first 5 positions):")
 
-    for pos_info in analysis["positions"][:10]:
-        top_pred = pos_info["top5_a"][0]
-        correct = "✓" if pos_info["target_token_a"] == top_pred[0] else ""
-        print(
-            f"{pos_info['pos']:>3} | "
-            f"{pos_info['input_token_a'][:12]:>12} | "
-            f"{pos_info['target_token_a'][:12]:>12} | "
-            f"{pos_info['target_prob_a']:>7.4f} | "
-            f"{top_pred[0][:15]:>15} ({top_pred[1]:.3f}) {correct}"
-        )
+    for pos_info in analysis["positions"][:5]:
+        print("-" * 80)
+        print(f"Position {pos_info['pos']}")
+        print("-" * 80)
 
-    print()
-    print("-" * 80)
-    print(f"{'Pos':>3} | {'Input B':>12} | {'Target B':>12} | {'P(tgt)':>8} | {'Top prediction B':>20}")
-    print("-" * 80)
+        # Stream A
+        target_in_top10_a = any(pos_info["target_token_a"] == t[0] for t in pos_info["top10_a"])
+        rank_a = next((i+1 for i, t in enumerate(pos_info["top10_a"]) if t[0] == pos_info["target_token_a"]), ">10")
+        print(f"  Stream A: '{pos_info['input_token_a']}' → '{pos_info['target_token_a']}' (P={pos_info['target_prob_a']:.4f}, rank={rank_a})")
+        print(f"  Top 10 predictions:")
+        for i, (tok, prob) in enumerate(pos_info["top10_a"]):
+            marker = "←" if tok == pos_info["target_token_a"] else ""
+            print(f"    {i+1:2}. '{tok}' ({prob:.4f}) {marker}")
 
-    for pos_info in analysis["positions"][:10]:
-        top_pred = pos_info["top5_b"][0]
-        correct = "✓" if pos_info["target_token_b"] == top_pred[0] else ""
-        print(
-            f"{pos_info['pos']:>3} | "
-            f"{pos_info['input_token_b'][:12]:>12} | "
-            f"{pos_info['target_token_b'][:12]:>12} | "
-            f"{pos_info['target_prob_b']:>7.4f} | "
-            f"{top_pred[0][:15]:>15} ({top_pred[1]:.3f}) {correct}"
-        )
+        print()
 
-    print()
+        # Stream B
+        target_in_top10_b = any(pos_info["target_token_b"] == t[0] for t in pos_info["top10_b"])
+        rank_b = next((i+1 for i, t in enumerate(pos_info["top10_b"]) if t[0] == pos_info["target_token_b"]), ">10")
+        print(f"  Stream B: '{pos_info['input_token_b']}' → '{pos_info['target_token_b']}' (P={pos_info['target_prob_b']:.4f}, rank={rank_b})")
+        print(f"  Top 10 predictions:")
+        for i, (tok, prob) in enumerate(pos_info["top10_b"]):
+            marker = "←" if tok == pos_info["target_token_b"] else ""
+            print(f"    {i+1:2}. '{tok}' ({prob:.4f}) {marker}")
+
+        print()
 
 
 def compute_accuracy(analysis: dict) -> tuple[float, float]:
@@ -223,9 +218,9 @@ def compute_accuracy(analysis: dict) -> tuple[float, float]:
     total = len(analysis["positions"])
 
     for pos_info in analysis["positions"]:
-        if pos_info["top5_a"] and pos_info["target_token_a"] == pos_info["top5_a"][0][0]:
+        if pos_info["top10_a"] and pos_info["target_token_a"] == pos_info["top10_a"][0][0]:
             correct_a += 1
-        if pos_info["top5_b"] and pos_info["target_token_b"] == pos_info["top5_b"][0][0]:
+        if pos_info["top10_b"] and pos_info["target_token_b"] == pos_info["top10_b"][0][0]:
             correct_b += 1
 
     acc_a = correct_a / total if total > 0 else 0
