@@ -11,6 +11,14 @@ import torch
 from config import DualStreamConfig
 
 
+def find_embedding_key(state_dict):
+    """Find the embedding weight key in the state dict."""
+    for key in state_dict.keys():
+        if "wte.weight" in key:
+            return key
+    raise KeyError(f"Could not find embedding weights. Keys: {list(state_dict.keys())[:10]}...")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compare embeddings between checkpoints")
     parser.add_argument("checkpoint1", type=str, help="First checkpoint (e.g., initial)")
@@ -26,9 +34,15 @@ def main():
     # Get config (from checkpoint or default)
     config = ckpt1.get("config", DualStreamConfig())
 
+    # Find embedding key
+    state_dict1 = ckpt1["model_state_dict"]
+    state_dict2 = ckpt2["model_state_dict"]
+    embed_key = find_embedding_key(state_dict1)
+    print(f"Found embedding key: {embed_key}")
+
     # Extract embedding weights
-    embed1 = ckpt1["model_state_dict"]["gpt2.wte.weight"]
-    embed2 = ckpt2["model_state_dict"]["gpt2.wte.weight"]
+    embed1 = state_dict1[embed_key]
+    embed2 = state_dict2[embed_key]
 
     print()
     print("=" * 60)
